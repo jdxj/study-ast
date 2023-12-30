@@ -1,27 +1,26 @@
 package main
 
 import (
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
-	"path/filepath"
+	"path"
 	"reflect"
 	"strings"
 )
 
-/*
- 1. 解析 go 文件
- 2. 查找指定 struct
- 3. 读取字段 name type comment
- 4. 如果某字段为struct
-    a. 如果是本包
-    b. 如果是其他包, 则解析对应包中的 go 文件
-*/
+var (
+	// go mod name
+	// todo: 不同项目要替换
+	modName = "github.com/jdxj/study-ast/"
+	// 解析缓存
+	pkgMap = make(map[string]*ast.Package)
+)
+
 func main() {
 }
 
+// Struct 描述了其所含字段的描述
 type Struct struct {
 	Name   string
 	Fields []Field
@@ -33,106 +32,164 @@ type Field struct {
 	Description string
 }
 
-func findPkg(path string) (map[string]*ast.Package, error) {
-	var dirs []string
-	err := filepath.WalkDir(path, func(path string, d fs.DirEntry, err error) error {
-		if !d.IsDir() {
-			return nil
-		}
-		dirs = append(dirs, path)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(dirs) == 0 {
-		return nil, nil
-	}
-
-	var (
-		tfs    = token.NewFileSet()
-		pkgMap = make(map[string]*ast.Package)
-	)
-	for _, p := range dirs {
-		pkgs, err := parser.ParseDir(tfs, p, nil, parser.ParseComments)
+// findPkg 在指定的 pkgPath 中寻找 structName,
+// 返回值中第0个为该 structName, 剩余的是其所依赖的 struct.
+func findPkg(pkgPath, structName string) []Struct {
+	_, ok := pkgMap[pkgPath]
+	if !ok {
+		tfs := token.NewFileSet()
+		pkgs, err := parser.ParseDir(tfs, pkgPath, nil, parser.ParseComments)
 		if err != nil {
-			return nil, err
+			panic(err)
 		}
 
-		for pkg, astPkg := range pkgs {
-			pkgPath := filepath.Join(p, pkg)
+		// pkgPath 为某个包的路径, 所以 pkgs 中只有一个值
+		for _, astPkg := range pkgs {
 			pkgMap[pkgPath] = astPkg
 		}
 	}
-	return pkgMap, nil
+	return findStructInPkg(pkgPath, pkgMap[pkgPath], structName)
 }
 
-func findStruct(pkgMap map[string]*ast.Package, name ...string) []*ast.TypeSpec {
-	if len(name) == 0 {
-		return nil
+func findStructInPkg(curPkgPath string, astPkg *ast.Package, structName string) []Struct {
+	var ss []Struct
+	for _, file := range astPkg.Files {
+		ss = append(ss, findStructInFile(file, curPkgPath, structName)...)
 	}
-	nameMap := make(map[string]struct{})
-	for _, v := range name {
-		nameMap[v] = struct{}{}
-	}
-
-	var typeSpecs []*ast.TypeSpec
-	for pkgPath, astPkg := range pkgMap {
-		typeSpecs = append(typeSpecs, findStructInPkg(pkgPath, astPkg, nameMap)...)
-	}
-	return typeSpecs
+	return ss
 }
 
-func findStructInPkg(pkgPath string, astPkg *ast.Package, nameMap map[string]struct{}) []*ast.TypeSpec {
-	var typeSpecs []*ast.TypeSpec
-	for filePath, file := range astPkg.Files {
-		typeSpecs = append(typeSpecs, findStructInFile(filePath, file, nameMap)...)
-	}
-	return typeSpecs
-}
-
-func findStructInFile(filePath string, file *ast.File, nameMap map[string]struct{}) []*ast.TypeSpec {
-	var typeSpecs []*ast.TypeSpec
+func findStructInFile(file *ast.File, curPkgPath, structName string) []Struct {
+	var (
+		ss        []Struct
+		importMap = make(map[string]string)
+	)
 	for _, decl := range file.Decls {
 		genDecl, ok := decl.(*ast.GenDecl)
 		if !ok {
 			continue
 		}
-		if genDecl.Tok != token.TYPE {
-			continue
-		}
-		for _, spec := range genDecl.Specs {
-			typeSpec, ok := spec.(*ast.TypeSpec)
-			if !ok {
-				continue
-			}
-			_, ok = nameMap[typeSpec.Name.Name]
-			if !ok {
-				continue
-			}
-			_, ok = typeSpec.Type.(*ast.StructType)
-			if !ok {
-				continue
-			}
-			typeSpecs = append(typeSpecs, typeSpec)
 
+		switch genDecl.Tok {
+		case token.IMPORT:
+			// 记录当前文件的 import
+			for _, spec := range genDecl.Specs {
+				importSpec := spec.(*ast.ImportSpec)
+				pkgPath := strings.Trim(importSpec.Path.Value, `"`)
+				pkgPath = strings.TrimPrefix(pkgPath, modName)
+
+				pkg := path.Base(pkgPath)
+				if importSpec.Name != nil {
+					pkg = importSpec.Name.Name
+				}
+				importMap[pkg] = pkgPath
+			}
+
+		case token.TYPE:
+			// 寻找 struct 定义
+			for _, spec := range genDecl.Specs {
+				typeSpec, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				if typeSpec.Name.Name != structName {
+					continue
+				}
+				structType, ok := typeSpec.Type.(*ast.StructType)
+				if !ok {
+					continue
+				}
+
+				// 创建 Struct
+				fields, ssIn := getFields(importMap, structType)
+				s := Struct{
+					Name:   structName,
+					Fields: fields,
+				}
+
+				ss = append(ss, s)
+				ss = append(ss, ssIn...)
+				// 递归查找
+				ss = append(ss, getDeepStruct(importMap, structType, curPkgPath)...)
+			}
 		}
+
 	}
-	return typeSpecs
+	return ss
 }
 
-func printField(typeSpecs []*ast.TypeSpec) {
-	for _, typeSpec := range typeSpecs {
-		fmt.Printf("%s:\n", typeSpec.Name.Name)
+// getFields 获取当前 struct 的 field
+func getFields(importMap map[string]string, structType *ast.StructType) ([]Field, []Struct) {
+	var (
+		fields = make([]Field, 0, len(structType.Fields.List))
+		ssOut  []Struct
+	)
+	for _, field := range structType.Fields.List {
+		// 匿名字段
+		if field.Names == nil {
+			switch expr := field.Type.(type) {
+			case *ast.StarExpr:
+				switch expr := expr.X.(type) {
+				case *ast.SelectorExpr:
+					pkg := expr.X.(*ast.Ident).Name
+					structName := expr.Sel.Name
+					ssIn := findPkg(importMap[pkg], structName)
+					// 第一个是 structName 本身, 将其 fields 赋给当前 struct
+					fields = append(fields, ssIn[0].Fields...)
+					// 剩下的是 structName 所依赖的
+					ssOut = append(ssOut, ssIn[1:]...)
+				}
 
-		structType := typeSpec.Type.(*ast.StructType)
-		for _, field := range structType.Fields.List {
-			tag := getTag(field)
-			typ := getType(field)
-			desc := getDescription(field)
-			fmt.Printf("    %s, %s, %s\n", tag, typ, desc)
+			case *ast.SelectorExpr:
+				pkg := expr.X.(*ast.Ident).Name
+				structName := expr.Sel.Name
+				ssIn := findPkg(importMap[pkg], structName)
+				// 第一个是 structName 本身, 将其 fields 赋给当前 struct
+				fields = append(fields, ssIn[0].Fields...)
+				// 剩下的是 structName 所依赖的
+				ssOut = append(ssOut, ssIn[1:]...)
+			}
+			continue
+		}
+
+		// 普通字段
+		fields = append(fields, Field{
+			Name:        getTag(field),
+			Type:        getType(field),
+			Description: getDescription(field),
+		})
+	}
+	return fields, ssOut
+}
+
+func getDeepStruct(importMap map[string]string, structType *ast.StructType, curPkgPath string) []Struct {
+	var ss []Struct
+	for _, field := range structType.Fields.List {
+		// 跳过匿名
+		if field.Names == nil {
+			continue
+		}
+
+		switch expr := field.Type.(type) {
+		case *ast.StarExpr:
+			switch expr := expr.X.(type) {
+			case *ast.SelectorExpr:
+				pkg := expr.X.(*ast.Ident).Name
+				structName := expr.Sel.Name
+				ss = append(ss, findPkg(importMap[pkg], structName)...)
+			}
+
+		case *ast.SelectorExpr:
+			pkg := expr.X.(*ast.Ident).Name
+			structName := expr.Sel.Name
+			ss = append(ss, findPkg(importMap[pkg], structName)...)
+
+		case *ast.Ident:
+			structName := expr.Name
+			ss = append(ss, findPkg(curPkgPath, structName)...)
 		}
 	}
+	return ss
 }
 
 func getTag(field *ast.Field) string {
@@ -151,6 +208,9 @@ func getType(field *ast.Field) string {
 		case *ast.SelectorExpr:
 			typ = expr.Sel.Name
 		}
+
+	case *ast.SelectorExpr:
+		typ = expr.Sel.Name
 
 	case *ast.Ident:
 		typ = expr.Name
