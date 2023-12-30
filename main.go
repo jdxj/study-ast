@@ -101,7 +101,7 @@ func findStructInFile(file *ast.File, curPkgPath, structName string) []Struct {
 				}
 
 				// 创建 Struct
-				fields, ssIn := getFields(importMap, structType)
+				fields, ssIn := getFields(importMap, structType, curPkgPath)
 				s := Struct{
 					Name:   structName,
 					Fields: fields,
@@ -119,7 +119,7 @@ func findStructInFile(file *ast.File, curPkgPath, structName string) []Struct {
 }
 
 // getFields 获取当前 struct 的 field
-func getFields(importMap map[string]string, structType *ast.StructType) ([]Field, []Struct) {
+func getFields(importMap map[string]string, structType *ast.StructType, curPkgPath string) ([]Field, []Struct) {
 	var (
 		fields = make([]Field, 0, len(structType.Fields.List))
 		ssOut  []Struct
@@ -127,28 +127,34 @@ func getFields(importMap map[string]string, structType *ast.StructType) ([]Field
 	for _, field := range structType.Fields.List {
 		// 匿名字段
 		if field.Names == nil {
+			var (
+				pkgPath    = curPkgPath
+				structName string
+			)
 			switch expr := field.Type.(type) {
 			case *ast.StarExpr:
 				switch expr := expr.X.(type) {
 				case *ast.SelectorExpr:
-					pkg := expr.X.(*ast.Ident).Name
-					structName := expr.Sel.Name
-					ssIn := findPkg(importMap[pkg], structName)
-					// 第一个是 structName 本身, 将其 fields 赋给当前 struct
-					fields = append(fields, ssIn[0].Fields...)
-					// 剩下的是 structName 所依赖的
-					ssOut = append(ssOut, ssIn[1:]...)
+					pkgPath = importMap[expr.X.(*ast.Ident).Name]
+					structName = expr.Sel.Name
+
+				case *ast.Ident:
+					structName = expr.Name
 				}
 
 			case *ast.SelectorExpr:
-				pkg := expr.X.(*ast.Ident).Name
-				structName := expr.Sel.Name
-				ssIn := findPkg(importMap[pkg], structName)
-				// 第一个是 structName 本身, 将其 fields 赋给当前 struct
-				fields = append(fields, ssIn[0].Fields...)
-				// 剩下的是 structName 所依赖的
-				ssOut = append(ssOut, ssIn[1:]...)
+				pkgPath = importMap[expr.X.(*ast.Ident).Name]
+				structName = expr.Sel.Name
+
+			case *ast.Ident:
+				structName = expr.Name
 			}
+
+			ssIn := findPkg(pkgPath, structName)
+			// 第一个是 structName 本身, 将其 fields 赋给当前 struct
+			fields = append(fields, ssIn[0].Fields...)
+			// 剩下的是 structName 所依赖的
+			ssOut = append(ssOut, ssIn[1:]...)
 			continue
 		}
 
@@ -170,24 +176,27 @@ func getDeepStruct(importMap map[string]string, structType *ast.StructType, curP
 			continue
 		}
 
+		var (
+			pkgPath    = curPkgPath
+			structName string
+		)
 		switch expr := field.Type.(type) {
 		case *ast.StarExpr:
 			switch expr := expr.X.(type) {
 			case *ast.SelectorExpr:
-				pkg := expr.X.(*ast.Ident).Name
-				structName := expr.Sel.Name
-				ss = append(ss, findPkg(importMap[pkg], structName)...)
+				pkgPath = importMap[expr.X.(*ast.Ident).Name]
+				structName = expr.Sel.Name
 			}
 
 		case *ast.SelectorExpr:
-			pkg := expr.X.(*ast.Ident).Name
-			structName := expr.Sel.Name
-			ss = append(ss, findPkg(importMap[pkg], structName)...)
+			pkgPath = importMap[expr.X.(*ast.Ident).Name]
+			structName = expr.Sel.Name
 
 		case *ast.Ident:
-			structName := expr.Name
-			ss = append(ss, findPkg(curPkgPath, structName)...)
+			structName = expr.Name
 		}
+
+		ss = append(ss, findPkg(pkgPath, structName)...)
 	}
 	return ss
 }

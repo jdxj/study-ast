@@ -8,6 +8,7 @@ type People struct {
 	Animal mp.Animal `json:"animal"` // 动物
 	Age    int       `json:"age"`    // 年龄
 	Rap    Rap       `json:"rap"`    // 低
+	// *Rap
 }
 
 type Rap struct {
