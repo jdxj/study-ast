@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -11,13 +13,30 @@ import (
 
 var (
 	// go mod name
-	// todo: 不同项目要替换
-	modName = "github.com/jdxj/study-ast/"
+	modName string
+	pkgPath string
+	name    string
 	// 解析缓存
 	pkgMap = make(map[string]*ast.Package)
 )
 
 func main() {
+	flag.StringVar(&modName, "mod-name", "", "go mod name")
+	flag.StringVar(&pkgPath, "pkg-path", "", "target struct pkg path without mod-name")
+	flag.StringVar(&name, "name", "", "struct name")
+	flag.Parse()
+
+	if modName == "" || pkgPath == "" || name == "" {
+		return
+	}
+
+	ss := findPkg(pkgPath, name)
+	for _, s := range ss {
+		fmt.Printf("%s:\n", s.Name)
+		for _, v := range s.Fields {
+			fmt.Printf("    |%s|%s|%s|\n", v.Name, v.Type, v.Description)
+		}
+	}
 }
 
 // Struct 描述了其所含字段的描述
@@ -76,7 +95,7 @@ func findStructInFile(file *ast.File, curPkgPath, structName string) []Struct {
 			for _, spec := range genDecl.Specs {
 				importSpec := spec.(*ast.ImportSpec)
 				pkgPath := strings.Trim(importSpec.Path.Value, `"`)
-				pkgPath = strings.TrimPrefix(pkgPath, modName)
+				pkgPath = strings.TrimPrefix(pkgPath, modName+"/")
 
 				pkg := path.Base(pkgPath)
 				if importSpec.Name != nil {
