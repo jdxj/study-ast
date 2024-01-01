@@ -13,7 +13,7 @@ import (
 
 var (
 	// go mod name
-	modName string
+	modName = "github.com/jdxj/study-ast"
 	pkgPath string
 	name    string
 	// 解析缓存
@@ -30,7 +30,7 @@ func main() {
 		return
 	}
 
-	ss := findPkg(pkgPath, name)
+	ss := findStruct(pkgPath, name)
 	for _, s := range ss {
 		fmt.Printf("%s:\n", s.Name)
 		for _, v := range s.Fields {
@@ -51,9 +51,9 @@ type Field struct {
 	Description string
 }
 
-// findPkg 在指定的 pkgPath 中寻找 structName,
+// findStruct 在指定的 pkgPath 中寻找 structName,
 // 返回值中第0个为该 structName, 剩余的是其所依赖的 struct.
-func findPkg(pkgPath, structName string) []Struct {
+func findStruct(pkgPath, structName string) []Struct {
 	_, ok := pkgMap[pkgPath]
 	if !ok {
 		tfs := token.NewFileSet()
@@ -146,31 +146,10 @@ func getFields(importMap map[string]string, structType *ast.StructType, curPkgPa
 	for _, field := range structType.Fields.List {
 		// 匿名字段
 		if field.Names == nil {
-			var (
-				pkgPath    = curPkgPath
-				structName string
-			)
-			switch expr := field.Type.(type) {
-			case *ast.StarExpr:
-				switch expr := expr.X.(type) {
-				case *ast.SelectorExpr:
-					pkgPath = importMap[expr.X.(*ast.Ident).Name]
-					structName = expr.Sel.Name
-
-				case *ast.Ident:
-					structName = expr.Name
-				}
-
-			case *ast.SelectorExpr:
-				pkgPath = importMap[expr.X.(*ast.Ident).Name]
-				structName = expr.Sel.Name
-
-			case *ast.Ident:
-				structName = expr.Name
-			}
-
-			ssIn := findPkg(pkgPath, structName)
+			pkgPath, structName, _ := unwrapFieldType(importMap, curPkgPath, field)
+			ssIn := findStruct(pkgPath, structName)
 			// 第一个是 structName 本身, 将其 fields 赋给当前 struct
+			// len(ssIn) != 0, 否则是不能编译的 go 代码
 			fields = append(fields, ssIn[0].Fields...)
 			// 剩下的是 structName 所依赖的
 			ssOut = append(ssOut, ssIn[1:]...)
@@ -195,27 +174,8 @@ func getDeepStruct(importMap map[string]string, structType *ast.StructType, curP
 			continue
 		}
 
-		var (
-			pkgPath    = curPkgPath
-			structName string
-		)
-		switch expr := field.Type.(type) {
-		case *ast.StarExpr:
-			switch expr := expr.X.(type) {
-			case *ast.SelectorExpr:
-				pkgPath = importMap[expr.X.(*ast.Ident).Name]
-				structName = expr.Sel.Name
-			}
-
-		case *ast.SelectorExpr:
-			pkgPath = importMap[expr.X.(*ast.Ident).Name]
-			structName = expr.Sel.Name
-
-		case *ast.Ident:
-			structName = expr.Name
-		}
-
-		ss = append(ss, findPkg(pkgPath, structName)...)
+		pkgPath, structName, _ := unwrapFieldType(importMap, curPkgPath, field)
+		ss = append(ss, findStruct(pkgPath, structName)...)
 	}
 	return ss
 }
@@ -228,21 +188,34 @@ func getTag(field *ast.Field) string {
 	return reflect.StructTag(tag).Get("json")
 }
 
-func getType(field *ast.Field) string {
-	var typ string
-	switch expr := field.Type.(type) {
-	case *ast.StarExpr:
-		switch expr := expr.X.(type) {
+func unwrapFieldType(importMap map[string]string, curPkgPath string, field *ast.Field) (
+	pkgPath, structName, literal string) {
+
+	pkgPath = curPkgPath
+	var (
+		expr   = field.Type
+		prefix string
+	)
+	for {
+		switch exprType := expr.(type) {
+		case *ast.ArrayType:
+			expr = exprType.Elt
+			prefix += "[]"
+		case *ast.StarExpr:
+			expr = exprType.X
 		case *ast.SelectorExpr:
-			typ = expr.Sel.Name
+			pkgPath = importMap[exprType.X.(*ast.Ident).Name]
+			expr = exprType.Sel
+		case *ast.Ident:
+			structName = exprType.Name
+			literal = prefix + exprType.Name
+			return
 		}
-
-	case *ast.SelectorExpr:
-		typ = expr.Sel.Name
-
-	case *ast.Ident:
-		typ = expr.Name
 	}
+}
+
+func getType(field *ast.Field) string {
+	_, _, typ := unwrapFieldType(nil, "", field)
 	return typ
 }
 
