@@ -120,7 +120,7 @@ func findStructInFile(file *ast.File, curPkgPath, structName string) []Struct {
 				}
 
 				// 创建 Struct
-				fields, ssIn := getFields(importMap, structType, curPkgPath)
+				fields, ssIn := getFields(importMap, structType, structName, curPkgPath)
 				s := Struct{
 					Name:   structName,
 					Fields: fields,
@@ -138,15 +138,15 @@ func findStructInFile(file *ast.File, curPkgPath, structName string) []Struct {
 }
 
 // getFields 获取当前 struct 的 field
-func getFields(importMap map[string]string, structType *ast.StructType, curPkgPath string) ([]Field, []Struct) {
+func getFields(importMap map[string]string, parentStructType *ast.StructType, parentStructName, curPkgPath string) ([]Field, []Struct) {
 	var (
-		fields = make([]Field, 0, len(structType.Fields.List))
+		fields = make([]Field, 0, len(parentStructType.Fields.List))
 		ssOut  []Struct
 	)
-	for _, field := range structType.Fields.List {
+	for _, field := range parentStructType.Fields.List {
+		pkgPath, structName, typ, structType := unwrapFieldType(importMap, curPkgPath, field)
 		// 匿名字段
 		if field.Names == nil {
-			pkgPath, structName, _ := unwrapFieldType(importMap, curPkgPath, field)
 			ssIn := findStruct(pkgPath, structName)
 			// 第一个是 structName 本身, 将其 fields 赋给当前 struct
 			// len(ssIn) != 0, 否则是不能编译的 go 代码
@@ -156,10 +156,23 @@ func getFields(importMap map[string]string, structType *ast.StructType, curPkgPa
 			continue
 		}
 
+		// 匿名 struct
+		if structType != nil {
+			structName = fmt.Sprintf(".%s.%s", parentStructName, structName)
+			fields, ssIn := getFields(importMap, structType, structName, curPkgPath)
+			s := Struct{
+				Name:   structName,
+				Fields: fields,
+			}
+			ssOut = append(ssOut, s)
+			ssOut = append(ssOut, ssIn...)
+		}
+
 		// 普通字段
 		fields = append(fields, Field{
-			Name:        getTag(field),
-			Type:        getType(field),
+			Name: getTag(field),
+			//Type:        getType(field),
+			Type:        typ,
 			Description: getDescription(field),
 		})
 	}
@@ -174,7 +187,10 @@ func getDeepStruct(importMap map[string]string, structType *ast.StructType, curP
 			continue
 		}
 
-		pkgPath, structName, _ := unwrapFieldType(importMap, curPkgPath, field)
+		pkgPath, structName, _, st := unwrapFieldType(importMap, curPkgPath, field)
+		if st != nil {
+			continue
+		}
 		ss = append(ss, findStruct(pkgPath, structName)...)
 	}
 	return ss
@@ -189,9 +205,13 @@ func getTag(field *ast.Field) string {
 }
 
 func unwrapFieldType(importMap map[string]string, curPkgPath string, field *ast.Field) (
-	pkgPath, structName, literal string) {
+	pkgPath, structName, literal string, structType *ast.StructType) {
 
 	pkgPath = curPkgPath
+	if len(field.Names) != 0 {
+		// 匿名 struct 使用字段名
+		structName = field.Names[0].Name
+	}
 	var (
 		expr   = field.Type
 		prefix string
@@ -206,17 +226,16 @@ func unwrapFieldType(importMap map[string]string, curPkgPath string, field *ast.
 		case *ast.SelectorExpr:
 			pkgPath = importMap[exprType.X.(*ast.Ident).Name]
 			expr = exprType.Sel
+		case *ast.StructType:
+			literal = prefix + "struct"
+			structType = exprType
+			return
 		case *ast.Ident:
 			structName = exprType.Name
 			literal = prefix + exprType.Name
 			return
 		}
 	}
-}
-
-func getType(field *ast.Field) string {
-	_, _, typ := unwrapFieldType(nil, "", field)
-	return typ
 }
 
 func getDescription(field *ast.Field) string {

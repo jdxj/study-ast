@@ -6,7 +6,7 @@ import (
 )
 
 func TestFindStruct(t *testing.T) {
-	ss := findStruct("demo/pkg1", "Sing")
+	ss := findStruct("demo/pkg2", "People")
 
 	for _, s := range ss {
 		fmt.Printf("%s:\n", s.Name)
