@@ -230,6 +230,10 @@ func unwrapFieldType(importMap map[string]string, curPkgPath string, field *ast.
 			literal = prefix + "struct"
 			structType = exprType
 			return
+		case *ast.InterfaceType:
+			literal = prefix + "Object"
+			structName = "interface"
+			return
 		case *ast.Ident:
 			structName = exprType.Name
 			literal = prefix + exprType.Name
